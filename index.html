@@ -5,42 +5,86 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>文字数カウンター</title>
 <style>
-  :root { --bg:#f6f3ee; --card:#fff; --text:#222; --muted:#777; --accent:#8a5a2b; }
+  :root { --bg:#f6f3ee; --card:#fff; --text:#222; --muted:#777; --accent:#8a5a2b; --over:#c0392b; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text);
          font-family: system-ui, "Hiragino Sans", "Yu Gothic UI", sans-serif; }
-  main { max-width: 720px; margin: 0 auto; padding: 32px 16px; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px; }
   h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: .05em; }
-  textarea { width:100%; height: 240px; padding:12px; font-size:1rem; line-height:1.7;
+  textarea { width:100%; height: 260px; padding:12px; font-size:1rem; line-height:1.7;
              border:1px solid #ddd; border-radius:8px; resize:vertical; }
-  .stats { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-top:16px; }
+  .hero { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 20px;
+          background:var(--card); border-radius:8px; padding:16px; margin-top:12px; }
+  .hero .num { font-size:2.6rem; font-weight:600; color:var(--accent); line-height:1; }
+  .hero .label { font-size:.9rem; color:var(--muted); }
+  .limit { display:flex; align-items:center; gap:8px; font-size:.9rem; margin-left:auto; }
+  .limit input { width:6em; padding:4px 8px; font-size:1rem; border:1px solid #ddd; border-radius:6px; }
+  #limitMsg { font-weight:600; min-width:8em; }
+  #limitMsg.over { color:var(--over); }
+  .hero.over .num { color:var(--over); }
+  .stats { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:12px; margin-top:12px; }
   .stat { background:var(--card); border-radius:8px; padding:12px; text-align:center; }
-  .stat b { display:block; font-size:1.6rem; color:var(--accent); }
-  .stat span { font-size:.85rem; color:var(--muted); }
+  .stat b { display:block; font-size:1.4rem; color:var(--text); }
+  .stat span { font-size:.8rem; color:var(--muted); }
+  .note { margin-top:20px; font-size:.8rem; color:var(--muted); line-height:1.7; }
 </style>
 </head>
 <body>
 <main>
   <h1>文字数カウンター</h1>
   <textarea id="input" placeholder="ここに文章を貼り付けてください"></textarea>
+
+  <div class="hero" id="hero">
+    <span class="num" id="zenkaku">0</span>
+    <span class="label">文字（全角換算・半角＝0.5）</span>
+    <div class="limit">
+      <label>上限 <input id="limit" type="number" min="1" placeholder="例 800"></label>
+      <span id="limitMsg"></span>
+    </div>
+  </div>
+
   <div class="stats">
-    <div class="stat"><b id="chars">0</b><span>文字数（空白含む）</span></div>
-    <div class="stat"><b id="charsNoSpace">0</b><span>文字数（空白除く）</span></div>
+    <div class="stat"><b id="chars">0</b><span>文字数（半角も1文字）</span></div>
+    <div class="stat"><b id="charsNoSpace">0</b><span>空白・改行を除く</span></div>
+    <div class="stat"><b id="genko">0</b><span id="genkoSub">原稿用紙（400字）</span></div>
     <div class="stat"><b id="lines">0</b><span>行数</span></div>
   </div>
+
+  <p class="note">
+    ・全角換算：半角英数字・記号・半角カナ・半角スペースを0.5文字として数えます（改行は数えません）。上限チェックもこの数で判定します。<br>
+    ・文字数は見た目どおりに数えます（絵文字や結合文字も1文字）。<br>
+    ・原稿用紙：20字×20行。段落（改行）ごとに新しい行から書く前提の簡易計算です（行頭禁則は考慮しません）。
+  </p>
 </main>
+<script src="extension/count.js"></script>
 <script>
-  const input = document.getElementById('input');
-  function count() {
-    const text = input.value;
-    const chars = [...text.replace(/\n/g, '')].length;
-    const charsNoSpace = [...text.replace(/\s/g, '')].length;
-    const lines = text === '' ? 0 : text.split('\n').length;
-    document.getElementById('chars').textContent = chars;
-    document.getElementById('charsNoSpace').textContent = charsNoSpace;
-    document.getElementById('lines').textContent = lines;
+  const $ = id => document.getElementById(id);
+
+  function render() {
+    const r = MojiCount.countAll($('input').value);
+    $('zenkaku').textContent = r.zenkaku;
+    $('chars').textContent = r.chars;
+    $('charsNoSpace').textContent = r.charsNoSpace;
+    $('genko').textContent = r.genkoPages + '枚';
+    $('genkoSub').textContent = `原稿用紙（${r.genkoLines}行・400字詰め）`;
+    $('lines').textContent = r.lines;
+
+    const limit = Number($('limit').value);
+    const msg = $('limitMsg');
+    const over = limit > 0 && r.zenkaku > limit;
+    msg.textContent = limit > 0 ? (over ? `${r.zenkaku - limit} 文字オーバー` : `あと ${limit - r.zenkaku} 文字`) : '';
+    msg.className = over ? 'over' : '';
+    $('hero').classList.toggle('over', over);
   }
-  input.addEventListener('input', count);
+  ['input', 'limit'].forEach(id => $(id).addEventListener('input', render));
+
+  // Chrome拡張から「#text=…」付きで開かれたら、その文章を読み込む
+  // （#以降はサーバーに送られないので、文章が外部に送信されることはありません）
+  if (location.hash.startsWith('#text=')) {
+    $('input').value = decodeURIComponent(location.hash.slice(6));
+    history.replaceState(null, '', location.pathname);
+  }
+  render();
 </script>
 </body>
 </html>
