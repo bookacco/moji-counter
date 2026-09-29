@@ -129,7 +129,8 @@
     const now = new Date().toISOString();
     await saveTrash([...(await loadTrash()), ...marks.map(m => ({ ...m, deletedAt: now }))]);
   }
-  // ids を指定するとその分だけ、省略するとごみ箱の全部を戻す。戻した件数を返す
+  // ids を指定するとその分だけ、省略するとごみ箱の全部を戻す
+  // 戻り値：{ count: 戻そうとした件数, dropped: 同じ場所に新しいマーカーがあったため省いた件数 }
   async function restoreFromTrash(ids) {
     const trash = await loadTrash();
     const pick = ids ? trash.filter(m => ids.includes(m.id)) : trash;
@@ -143,8 +144,36 @@
     }
     await save(list);
     await saveTrash(rest);
-    await restore();
-    return pick.length;
+    const dropped = await restore();
+    return { count: pick.length, dropped: dropped.filter(id => pick.some(m => m.id === id)).length };
+  }
+  // ごみ箱を「消した操作」ごとにまとめる（同じ操作で消したものは deletedAt が同じ）
+  function trashBatches(trash) {
+    const order = [], map = new Map();
+    for (const m of trash) {
+      const k = m.deletedAt || m.id;
+      if (!map.has(k)) { map.set(k, []); order.push(k); }
+      map.get(k).push(m);
+    }
+    return order.map(k => map.get(k));
+  }
+  // 直前の1操作分だけ戻す（Ctrl+Z と同じ考え方）
+  async function restoreLastBatch() {
+    const batches = trashBatches(await loadTrash());
+    if (!batches.length) return { count: 0, dropped: 0 };
+    return restoreFromTrash(batches[batches.length - 1].map(m => m.id));
+  }
+
+  // 本文の start〜end の範囲に、すでにマーカーが引かれているか（重なっているマーカーのidを返す）
+  function overlappingIds(idx, start, end) {
+    const ids = new Set();
+    for (let i = 0; i < idx.nodes.length; i++) {
+      const s = idx.starts[i], e = s + idx.nodes[i].data.length;
+      if (e <= start || s >= end) continue;
+      const m = idx.nodes[i].parentElement?.closest('mark[data-moji-mark]');
+      if (m) ids.add(m.dataset.mojiMark);
+    }
+    return [...ids];
   }
 
   // ---------- マーカーを追加（選択範囲から） ----------
@@ -164,9 +193,12 @@
       pos: start,
       created: new Date().toISOString()
     };
-    wrap(idx, start, end, mark.id);
+    // 既存のマーカーと重なる場合は、新しく引いた方に置き換える（二重に重ねない）
+    const replaced = overlappingIds(idx, start, end);
+    replaced.forEach(unwrap);
+    wrap(replaced.length ? indexText() : idx, start, end, mark.id);
     window.getSelection()?.removeAllRanges();
-    const list = await load();
+    const list = (await load()).filter(m => !replaced.includes(m.id));
     list.push(mark);
     await save(list);
     drawTicks();
@@ -194,15 +226,20 @@
   async function restore() {
     const list = await load();
     const todo = list.filter(m => !document.querySelector(`mark[data-moji-mark="${m.id}"]`));
-    if (!todo.length) { missing = []; drawTicks(); return; }
+    if (!todo.length) { missing = []; drawTicks(); return []; }
     missing = [];
-    for (const m of todo) {
+    const dropped = [];
+    for (const m of [...todo].reverse()) { // 新しいものから引く
       const idx = indexText(); // 引くたびにテキストノードが分割されるので毎回作り直す
       const at = find(idx, m);
-      if (at >= 0) wrap(idx, at, at + m.quote.length, m.id);
-      else missing.push(m);
+      if (at < 0) { missing.push(m); continue; }
+      // すでに同じ場所にマーカーがあれば、重ねずに省く（引き直した新しい方を優先）
+      if (overlappingIds(idx, at, at + m.quote.length).length) { dropped.push(m.id); continue; }
+      wrap(idx, at, at + m.quote.length, m.id);
     }
+    if (dropped.length) await save(list.filter(m => !dropped.includes(m.id)));
     drawTicks();
+    return dropped;
   }
 
   // ---------- 右端の目印（クリックでその場所へ移動） ----------
@@ -249,7 +286,8 @@
   let toolbar = null, toolbarSeq = 0;
   async function drawToolbar(count) {
     const seq = ++toolbarSeq;
-    const trashCount = (await loadTrash()).length;
+    const batches = trashBatches(await loadTrash());
+    const trashCount = batches.length;
     if (seq !== toolbarSeq) return; // 新しい描画が後から来ていたらそちらに任せる
     if (!count && !trashCount) { toolbar?.remove(); toolbar = null; return; }
     if (!toolbar) {
@@ -277,11 +315,18 @@
       button('🗑', 'このページのマーカーをすべて消す（あとで ↩ から復元できます）', '#f2b705', clearAll);
     }
     if (trashCount) {
-      button(`↩ ${trashCount}`, '消したマーカーを復元する', '#e6e6e6', async () => {
-        const n = await restoreFromTrash();
-        notice(`マーカー ${n}件を復元しました` + (missing.length ? `（${missing.length}件は本文が見つかりません）` : ''));
+      const last = batches[batches.length - 1].length;
+      button(`↩ ${trashCount}`, `直前に消した分（${last}件）を戻す　※あと${trashCount}回戻せます`, '#e6e6e6', async () => {
+        notice(restoredMessage(await restoreLastBatch(), '復元しました'));
       });
     }
+  }
+  function restoredMessage(r, verb) {
+    if (r.count && r.count === r.dropped) return '同じ場所に新しいマーカーがあるため、戻す必要はありませんでした';
+    let msg = `マーカー ${r.count - r.dropped}件を${verb}`;
+    if (r.dropped) msg += `（${r.dropped}件は同じ場所に新しいマーカーがあるため省略）`;
+    if (missing.length) msg += `（${missing.length}件は本文が見つかりません）`;
+    return msg;
   }
   async function clearAll() {
     const list = await load();
@@ -292,8 +337,7 @@
     await save([]);
     drawTicks();
     notice(`マーカー ${list.length}件を消しました`, '元に戻す', async () => {
-      const n = await restoreFromTrash(ids);
-      notice(`マーカー ${n}件を元に戻しました`);
+      notice(restoredMessage(await restoreFromTrash(ids), '元に戻しました'));
     });
   }
   // ページ上の並び順（上から）でマーカーのidを返す
@@ -410,7 +454,7 @@
       await save(list.filter(m => m.id !== id));
       chip.remove(); chip = null;
       drawTicks();
-      notice('マーカーを消しました', '元に戻す', () => restoreFromTrash([id]));
+      notice('マーカーを消しました', '元に戻す', async () => notice(restoredMessage(await restoreFromTrash([id]), '元に戻しました')));
     });
     document.body.appendChild(chip);
     setTimeout(() => { chip?.remove(); chip = null; }, 3000);
@@ -435,5 +479,5 @@
   window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawTicks, 200); });
   window.addEventListener('load', () => setTimeout(drawTicks, 500));
 
-  window.MojiMarker = { addFromRange, restore, clearAll, restoreFromTrash, UI_ATTR, getMissing: () => missing };
+  window.MojiMarker = { addFromRange, restore, clearAll, restoreFromTrash, restoreLastBatch, UI_ATTR, getMissing: () => missing };
 })();
