@@ -1,14 +1,25 @@
 {
   "manifest_version": 3,
-  "name": "文字数カウンター（右クリック）",
-  "version": "1.1.0",
-  "description": "文章を選択すると文字数（全角換算）をその場に表示します。右クリックメニューにも文字数が出ます。計算はPC内だけで行います。",
-  "permissions": ["contextMenus"],
-  "background": { "service_worker": "background.js" },
+  "name": "文字数カウンター＆マーカー",
+  "version": "1.2.0",
+  "description": "選択すると文字数（全角換算）をその場に表示。重要な箇所にマーカーを引いて保存し、次に開いたときも復元します。データはこのPC内だけに保存します。",
+  "permissions": [
+    "contextMenus",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["count.js", "content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "count.js",
+        "marker.js",
+        "content.js"
+      ],
       "all_frames": true,
       "run_at": "document_idle"
     }
