@@ -4,7 +4,8 @@
 (() => {
   if (window.MojiMarker || window.top !== window) return; // いちばん外側のページだけで動かす
 
-  const COLOR = 'rgba(255, 221, 87, .75)';
+  const COLOR = 'rgba(255, 221, 87, .75)';       // 明るい背景用：薄い黄色（文字色はそのまま）
+  const DARK_BG = '#FFE066', DARK_TEXT = '#111';  // 暗い背景用：濃い黄色＋黒文字（白文字だと読みにくいため）
   const CONTEXT = 32;          // 前後に覚えておく文字数
   const UI_ATTR = 'data-moji-ui'; // 拡張自身が作った要素の目印
   const css = (node, styles) => Object.assign(node.style, styles);
@@ -56,6 +57,14 @@
     return [last, last.data.length];
   }
 
+  // 文字色が明るい（＝暗い背景のページ）かどうか
+  function isLightText(el) {
+    const m = getComputedStyle(el).color.match(/\d+(\.\d+)?/g);
+    if (!m) return false;
+    const [r, g, b] = m.map(Number);
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6;
+  }
+
   // ---------- 描画：範囲内のテキストを <mark> で囲む ----------
   function wrap(idx, start, end, id) {
     const pieces = [];
@@ -72,7 +81,9 @@
       if (a > 0) target = target.splitText(a);
       const m = document.createElement('mark');
       m.dataset.mojiMark = id;
-      css(m, { background: COLOR, color: 'inherit', padding: '0', borderRadius: '2px', cursor: 'pointer' });
+      const dark = isLightText(target.parentElement);
+      css(m, { background: dark ? DARK_BG : COLOR, color: dark ? DARK_TEXT : 'inherit',
+               padding: '0', borderRadius: '2px', cursor: 'pointer' });
       target.parentNode.insertBefore(m, target);
       m.appendChild(target);
       m.addEventListener('click', onMarkClick);
