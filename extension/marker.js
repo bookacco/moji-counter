@@ -112,6 +112,70 @@
     else await chrome.storage.local.remove(key);
   }
 
+  // ---------- ごみ箱：消したマーカーをページごとに保管（あとで復元できる） ----------
+  const trashKey = () => 'trash:' + location.origin + location.pathname + location.search;
+  async function loadTrash() {
+    const key = trashKey();
+    const data = await chrome.storage.local.get(key);
+    return data[key] || [];
+  }
+  async function saveTrash(list) {
+    const key = trashKey();
+    if (list.length) await chrome.storage.local.set({ [key]: list.slice(-200) }); // 1ページ最大200件
+    else await chrome.storage.local.remove(key);
+  }
+  async function moveToTrash(marks) {
+    if (!marks.length) return;
+    const now = new Date().toISOString();
+    await saveTrash([...(await loadTrash()), ...marks.map(m => ({ ...m, deletedAt: now }))]);
+  }
+  // ids を指定するとその分だけ、省略するとごみ箱の全部を戻す
+  // 戻り値：{ count: 戻そうとした件数, dropped: 同じ場所に新しいマーカーがあったため省いた件数 }
+  async function restoreFromTrash(ids) {
+    const trash = await loadTrash();
+    const pick = ids ? trash.filter(m => ids.includes(m.id)) : trash;
+    const rest = ids ? trash.filter(m => !ids.includes(m.id)) : [];
+    const list = await load();
+    const have = new Set(list.map(m => m.id));
+    for (const m of pick) {
+      if (have.has(m.id)) continue;
+      const { deletedAt, ...keep } = m;
+      list.push(keep);
+    }
+    await save(list);
+    await saveTrash(rest);
+    const dropped = await restore();
+    return { count: pick.length, dropped: dropped.filter(id => pick.some(m => m.id === id)).length };
+  }
+  // ごみ箱を「消した操作」ごとにまとめる（同じ操作で消したものは deletedAt が同じ）
+  function trashBatches(trash) {
+    const order = [], map = new Map();
+    for (const m of trash) {
+      const k = m.deletedAt || m.id;
+      if (!map.has(k)) { map.set(k, []); order.push(k); }
+      map.get(k).push(m);
+    }
+    return order.map(k => map.get(k));
+  }
+  // 直前の1操作分だけ戻す（Ctrl+Z と同じ考え方）
+  async function restoreLastBatch() {
+    const batches = trashBatches(await loadTrash());
+    if (!batches.length) return { count: 0, dropped: 0 };
+    return restoreFromTrash(batches[batches.length - 1].map(m => m.id));
+  }
+
+  // 本文の start〜end の範囲に、すでにマーカーが引かれているか（重なっているマーカーのidを返す）
+  function overlappingIds(idx, start, end) {
+    const ids = new Set();
+    for (let i = 0; i < idx.nodes.length; i++) {
+      const s = idx.starts[i], e = s + idx.nodes[i].data.length;
+      if (e <= start || s >= end) continue;
+      const m = idx.nodes[i].parentElement?.closest('mark[data-moji-mark]');
+      if (m) ids.add(m.dataset.mojiMark);
+    }
+    return [...ids];
+  }
+
   // ---------- マーカーを追加（選択範囲から） ----------
   async function addFromRange(range) {
     if (!range || range.collapsed) return false;
@@ -129,9 +193,12 @@
       pos: start,
       created: new Date().toISOString()
     };
-    wrap(idx, start, end, mark.id);
+    // 既存のマーカーと重なる場合は、新しく引いた方に置き換える（二重に重ねない）
+    const replaced = overlappingIds(idx, start, end);
+    replaced.forEach(unwrap);
+    wrap(replaced.length ? indexText() : idx, start, end, mark.id);
     window.getSelection()?.removeAllRanges();
-    const list = await load();
+    const list = (await load()).filter(m => !replaced.includes(m.id));
     list.push(mark);
     await save(list);
     drawTicks();
@@ -159,15 +226,20 @@
   async function restore() {
     const list = await load();
     const todo = list.filter(m => !document.querySelector(`mark[data-moji-mark="${m.id}"]`));
-    if (!todo.length) { missing = []; drawTicks(); return; }
+    if (!todo.length) { missing = []; drawTicks(); return []; }
     missing = [];
-    for (const m of todo) {
+    const dropped = [];
+    for (const m of [...todo].reverse()) { // 新しいものから引く
       const idx = indexText(); // 引くたびにテキストノードが分割されるので毎回作り直す
       const at = find(idx, m);
-      if (at >= 0) wrap(idx, at, at + m.quote.length, m.id);
-      else missing.push(m);
+      if (at < 0) { missing.push(m); continue; }
+      // すでに同じ場所にマーカーがあれば、重ねずに省く（引き直した新しい方を優先）
+      if (overlappingIds(idx, at, at + m.quote.length).length) { dropped.push(m.id); continue; }
+      wrap(idx, at, at + m.quote.length, m.id);
     }
+    if (dropped.length) await save(list.filter(m => !dropped.includes(m.id)));
     drawTicks();
+    return dropped;
   }
 
   // ---------- 右端の目印（クリックでその場所へ移動） ----------
@@ -177,7 +249,8 @@
     document.querySelectorAll('mark[data-moji-mark]').forEach(m => {
       if (!firsts.has(m.dataset.mojiMark)) firsts.set(m.dataset.mojiMark, m);
     });
-    if (!firsts.size) { rail?.remove(); rail = null; copyBtn?.remove(); copyBtn = null; return; }
+    drawToolbar(firsts.size);
+    if (!firsts.size) { rail?.remove(); rail = null; return; }
     if (!rail) {
       rail = document.createElement('div');
       rail.setAttribute(UI_ATTR, '');
@@ -185,7 +258,6 @@
                   zIndex: '2147483646', pointerEvents: 'none' });
       document.documentElement.appendChild(rail);
     }
-    drawCopyButton(firsts.size);
     rail.replaceChildren();
     const total = Math.max(document.documentElement.scrollHeight, 1);
     for (const [id, m] of firsts) {
@@ -210,24 +282,63 @@
     setTimeout(() => ms.forEach(m => { m.style.boxShadow = 'none'; }), 1200);
   }
 
-  // ---------- 右上のコピーボタン：ページ内のマーカーを上から順にまとめてコピー ----------
-  let copyBtn = null;
-  function drawCopyButton(count) {
-    if (!copyBtn) {
-      copyBtn = document.createElement('div');
-      copyBtn.setAttribute(UI_ATTR, '');
-      copyBtn.title = 'このページのマーカーをまとめてコピー';
-      css(copyBtn, {
-        position: 'fixed', top: '6px', right: '4px', zIndex: '2147483647', cursor: 'pointer',
-        background: '#f2b705', color: '#222', borderRadius: '6px', padding: '1px 6px',
+  // ---------- 右上のボタン：📋一括コピー／🗑一括クリア／↩復元 ----------
+  let toolbar = null, toolbarSeq = 0;
+  async function drawToolbar(count) {
+    const seq = ++toolbarSeq;
+    const batches = trashBatches(await loadTrash());
+    const trashCount = batches.length;
+    if (seq !== toolbarSeq) return; // 新しい描画が後から来ていたらそちらに任せる
+    if (!count && !trashCount) { toolbar?.remove(); toolbar = null; return; }
+    if (!toolbar) {
+      toolbar = document.createElement('div');
+      toolbar.setAttribute(UI_ATTR, '');
+      css(toolbar, { position: 'fixed', top: '6px', right: '4px', zIndex: '2147483647', display: 'flex', gap: '4px' });
+      toolbar.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
+      document.documentElement.appendChild(toolbar);
+    }
+    toolbar.replaceChildren();
+    const button = (label, title, bg, onClick) => {
+      const b = document.createElement('div');
+      b.textContent = label;
+      b.title = title;
+      css(b, {
+        cursor: 'pointer', background: bg, color: '#222', borderRadius: '6px', padding: '1px 6px',
         font: '600 12px/1.6 system-ui, "Yu Gothic UI", sans-serif', boxShadow: '0 1px 6px rgba(0,0,0,.3)',
         userSelect: 'none'
       });
-      copyBtn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
-      copyBtn.addEventListener('click', copyAll);
-      document.documentElement.appendChild(copyBtn);
+      b.addEventListener('click', onClick);
+      toolbar.appendChild(b);
+    };
+    if (count) {
+      button(`📋 ${count}`, 'このページのマーカーをまとめてコピー', '#f2b705', copyAll);
+      button('🗑', 'このページのマーカーをすべて消す（あとで ↩ から復元できます）', '#f2b705', clearAll);
     }
-    copyBtn.textContent = `📋 ${count}`;
+    if (trashCount) {
+      const last = batches[batches.length - 1].length;
+      button(`↩ ${trashCount}`, `直前に消した分（${last}件）を戻す　※あと${trashCount}回戻せます`, '#e6e6e6', async () => {
+        notice(restoredMessage(await restoreLastBatch(), '復元しました'));
+      });
+    }
+  }
+  function restoredMessage(r, verb) {
+    if (r.count && r.count === r.dropped) return '同じ場所に新しいマーカーがあるため、戻す必要はありませんでした';
+    let msg = `マーカー ${r.count - r.dropped}件を${verb}`;
+    if (r.dropped) msg += `（${r.dropped}件は同じ場所に新しいマーカーがあるため省略）`;
+    if (missing.length) msg += `（${missing.length}件は本文が見つかりません）`;
+    return msg;
+  }
+  async function clearAll() {
+    const list = await load();
+    if (!list.length) return;
+    const ids = list.map(m => m.id);
+    ids.forEach(unwrap);
+    await moveToTrash(list);
+    await save([]);
+    drawTicks();
+    notice(`マーカー ${list.length}件を消しました`, '元に戻す', async () => {
+      notice(restoredMessage(await restoreFromTrash(ids), '元に戻しました'));
+    });
   }
   // ページ上の並び順（上から）でマーカーのidを返す
   function orderedIds() {
@@ -252,23 +363,33 @@
     notice(ok ? `マーカー ${lines.length}件をコピーしました` : 'コピーできませんでした');
   }
 
-  // ---------- 右下の小さなお知らせ（「3 / 7」「コピーしました」など） ----------
+  // ---------- 右下の小さなお知らせ（「3 / 7」「コピーしました」「元に戻す」など） ----------
   let noticeEl = null, noticeTimer = null;
-  function notice(msg) {
+  function notice(msg, actionLabel, action) {
     if (!noticeEl) {
       noticeEl = document.createElement('div');
       noticeEl.setAttribute(UI_ATTR, '');
       css(noticeEl, {
-        position: 'fixed', right: '24px', bottom: '24px', zIndex: '2147483647', pointerEvents: 'none',
-        background: 'rgba(30,30,30,.88)', color: '#fff', borderRadius: '8px', padding: '4px 12px',
+        position: 'fixed', right: '24px', bottom: '24px', zIndex: '2147483647',
+        background: 'rgba(30,30,30,.9)', color: '#fff', borderRadius: '8px', padding: '4px 12px',
         font: '600 13px/1.6 system-ui, "Yu Gothic UI", sans-serif', transition: 'opacity .3s'
       });
+      noticeEl.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
       document.documentElement.appendChild(noticeEl);
     }
-    noticeEl.textContent = msg;
+    noticeEl.replaceChildren(document.createTextNode(msg));
+    if (action) {
+      const a = document.createElement('span');
+      a.textContent = actionLabel;
+      css(a, { marginLeft: '12px', color: '#ffd84d', textDecoration: 'underline', cursor: 'pointer' });
+      a.addEventListener('click', () => { noticeEl.style.opacity = '0'; action(); });
+      noticeEl.appendChild(a);
+    }
+    noticeEl.style.pointerEvents = action ? 'auto' : 'none';
     noticeEl.style.opacity = '1';
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => { if (noticeEl) noticeEl.style.opacity = '0'; }, 1300);
+    noticeTimer = setTimeout(() => { if (noticeEl) { noticeEl.style.opacity = '0'; noticeEl.style.pointerEvents = 'none'; } },
+                             action ? 6000 : 1300);
   }
 
   // ---------- Ctrl+↓ / Ctrl+↑ で次・前のマーカーへ移動 ----------
@@ -328,9 +449,12 @@
     chip.addEventListener('mousedown', ev => ev.stopPropagation(), true);
     chip.addEventListener('click', async () => {
       unwrap(id);
-      await save((await load()).filter(m => m.id !== id));
+      const list = await load();
+      await moveToTrash(list.filter(m => m.id === id));
+      await save(list.filter(m => m.id !== id));
       chip.remove(); chip = null;
       drawTicks();
+      notice('マーカーを消しました', '元に戻す', async () => notice(restoredMessage(await restoreFromTrash([id]), '元に戻しました')));
     });
     document.body.appendChild(chip);
     setTimeout(() => { chip?.remove(); chip = null; }, 3000);
@@ -355,5 +479,5 @@
   window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawTicks, 200); });
   window.addEventListener('load', () => setTimeout(drawTicks, 500));
 
-  window.MojiMarker = { addFromRange, restore, UI_ATTR, getMissing: () => missing };
+  window.MojiMarker = { addFromRange, restore, clearAll, restoreFromTrash, restoreLastBatch, UI_ATTR, getMissing: () => missing };
 })();
