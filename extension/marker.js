@@ -177,14 +177,15 @@
     document.querySelectorAll('mark[data-moji-mark]').forEach(m => {
       if (!firsts.has(m.dataset.mojiMark)) firsts.set(m.dataset.mojiMark, m);
     });
-    if (!firsts.size) { rail?.remove(); rail = null; return; }
+    if (!firsts.size) { rail?.remove(); rail = null; copyBtn?.remove(); copyBtn = null; return; }
     if (!rail) {
       rail = document.createElement('div');
       rail.setAttribute(UI_ATTR, '');
-      css(rail, { position: 'fixed', top: '0', right: '0', width: '14px', height: '100vh',
+      css(rail, { position: 'fixed', top: '34px', right: '0', width: '14px', height: 'calc(100vh - 34px)',
                   zIndex: '2147483646', pointerEvents: 'none' });
       document.documentElement.appendChild(rail);
     }
+    drawCopyButton(firsts.size);
     rail.replaceChildren();
     const total = Math.max(document.documentElement.scrollHeight, 1);
     for (const [id, m] of firsts) {
@@ -208,6 +209,108 @@
     ms.forEach(m => { m.style.transition = 'box-shadow .2s'; m.style.boxShadow = '0 0 0 3px #f2b705'; });
     setTimeout(() => ms.forEach(m => { m.style.boxShadow = 'none'; }), 1200);
   }
+
+  // ---------- 右上のコピーボタン：ページ内のマーカーを上から順にまとめてコピー ----------
+  let copyBtn = null;
+  function drawCopyButton(count) {
+    if (!copyBtn) {
+      copyBtn = document.createElement('div');
+      copyBtn.setAttribute(UI_ATTR, '');
+      copyBtn.title = 'このページのマーカーをまとめてコピー';
+      css(copyBtn, {
+        position: 'fixed', top: '6px', right: '4px', zIndex: '2147483647', cursor: 'pointer',
+        background: '#f2b705', color: '#222', borderRadius: '6px', padding: '1px 6px',
+        font: '600 12px/1.6 system-ui, "Yu Gothic UI", sans-serif', boxShadow: '0 1px 6px rgba(0,0,0,.3)',
+        userSelect: 'none'
+      });
+      copyBtn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
+      copyBtn.addEventListener('click', copyAll);
+      document.documentElement.appendChild(copyBtn);
+    }
+    copyBtn.textContent = `📋 ${count}`;
+  }
+  // ページ上の並び順（上から）でマーカーのidを返す
+  function orderedIds() {
+    const ids = [];
+    document.querySelectorAll('mark[data-moji-mark]').forEach(m => {
+      if (!ids.includes(m.dataset.mojiMark)) ids.push(m.dataset.mojiMark);
+    });
+    return ids;
+  }
+  async function copyAll() {
+    const byId = new Map((await load()).map(m => [m.id, m.quote]));
+    const lines = orderedIds().map(id => (byId.get(id) || '').replace(/\s*\n\s*/g, ' ').trim()).filter(Boolean);
+    const text = lines.join('\n');
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute(UI_ATTR, '');
+      css(ta, { position: 'fixed', top: '-1000px', opacity: '0' });
+      document.body.appendChild(ta); ta.select();
+      ok = document.execCommand('copy'); ta.remove();
+    }
+    notice(ok ? `マーカー ${lines.length}件をコピーしました` : 'コピーできませんでした');
+  }
+
+  // ---------- 右下の小さなお知らせ（「3 / 7」「コピーしました」など） ----------
+  let noticeEl = null, noticeTimer = null;
+  function notice(msg) {
+    if (!noticeEl) {
+      noticeEl = document.createElement('div');
+      noticeEl.setAttribute(UI_ATTR, '');
+      css(noticeEl, {
+        position: 'fixed', right: '24px', bottom: '24px', zIndex: '2147483647', pointerEvents: 'none',
+        background: 'rgba(30,30,30,.88)', color: '#fff', borderRadius: '8px', padding: '4px 12px',
+        font: '600 13px/1.6 system-ui, "Yu Gothic UI", sans-serif', transition: 'opacity .3s'
+      });
+      document.documentElement.appendChild(noticeEl);
+    }
+    noticeEl.textContent = msg;
+    noticeEl.style.opacity = '1';
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => { if (noticeEl) noticeEl.style.opacity = '0'; }, 1300);
+  }
+
+  // ---------- Ctrl+↓ / Ctrl+↑ で次・前のマーカーへ移動 ----------
+  function isEditable(el) {
+    return el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+  }
+  let lastId = null; // 直前にキーで移動したマーカー
+  function jump(dir) {
+    const ids = orderedIds();
+    if (!ids.length) return false;
+    const el = id => document.querySelector(`mark[data-moji-mark="${id}"]`);
+    let i;
+    const cur = lastId ? ids.indexOf(lastId) : -1;
+    const r = cur >= 0 ? el(lastId).getBoundingClientRect() : null;
+    if (r && r.bottom > 0 && r.top < window.innerHeight) {
+      // 直前のマーカーが画面内にある → そこから1つ前後へ（端まで行ったら反対側へ）
+      i = (cur + dir + ids.length) % ids.length;
+    } else {
+      // 自分でスクロールした後など → 画面の中央を基準に次・前を探す
+      const center = window.innerHeight / 2;
+      const mids = ids.map(id => { const b = el(id).getBoundingClientRect(); return (b.top + b.bottom) / 2; });
+      if (dir > 0) {
+        i = mids.findIndex(m => m > center + 20);
+        if (i < 0) i = 0;
+      } else {
+        i = -1;
+        mids.forEach((m, k) => { if (m < center - 20) i = k; });
+        if (i < 0) i = ids.length - 1;
+      }
+    }
+    lastId = ids[i];
+    el(lastId).scrollIntoView({ behavior: 'smooth', block: 'center' });
+    flash(lastId);
+    notice(`${i + 1} / ${ids.length}`);
+    return true;
+  }
+  window.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return;
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    if (isEditable(document.activeElement)) return; // 入力中はブラウザ本来の動きを優先
+    if (jump(e.key === 'ArrowDown' ? 1 : -1)) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
 
   // ---------- マーカーをクリック → 「消す」ボタン ----------
   let chip = null;
