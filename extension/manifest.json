@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "文字数カウンター＆マーカー",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "選択すると文字数（全角換算）をその場に表示。重要な箇所にマーカーを引いて保存し、次に開いたときも復元します。データはこのPC内だけに保存します。",
   "permissions": [
     "contextMenus",
