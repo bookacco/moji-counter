@@ -31,17 +31,41 @@
   // ---- 小バッジ ----
   let badge = null;
   function hideBadge() { if (badge) { badge.remove(); badge = null; } }
+  function isPageSelection() {
+    const el = document.activeElement;
+    return !(el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT'));
+  }
   function showBadge(r, x, y) {
     hideBadge();
     badge = document.createElement('div');
-    badge.textContent = `${r.zenkaku}字`;
+    badge.setAttribute('data-moji-ui', '');
     css(badge, {
       position: 'absolute', left: `${x + window.scrollX + 8}px`, top: `${y + window.scrollY + 8}px`,
-      zIndex: '2147483647', pointerEvents: 'none',
-      background: '#8a5a2b', color: '#fff', borderRadius: '10px', padding: '2px 8px',
-      font: '600 12px/1.6 system-ui, "Yu Gothic UI", "Hiragino Sans", sans-serif',
-      boxShadow: '0 2px 8px rgba(0,0,0,.2)', whiteSpace: 'nowrap'
+      zIndex: '2147483647', display: 'flex', alignItems: 'center', gap: '4px',
+      font: '600 12px/1.6 system-ui, "Yu Gothic UI", "Hiragino Sans", sans-serif', whiteSpace: 'nowrap'
     });
+    const pill = document.createElement('span');
+    pill.textContent = `${r.zenkaku}字`;
+    css(pill, { background: '#8a5a2b', color: '#fff', borderRadius: '10px', padding: '2px 8px',
+                boxShadow: '0 2px 8px rgba(0,0,0,.2)' });
+    badge.appendChild(pill);
+
+    // マーカー機能（marker.js）が使えるページ本文の選択なら「＋マーカー」ボタンを付ける
+    const sel = window.getSelection();
+    if (window.MojiMarker && isPageSelection() && sel && sel.rangeCount && !sel.isCollapsed) {
+      const range = sel.getRangeAt(0).cloneRange();
+      const btn = document.createElement('span');
+      btn.textContent = '＋マーカー';
+      css(btn, { background: '#f2b705', color: '#222', borderRadius: '10px', padding: '2px 8px',
+                 boxShadow: '0 2px 8px rgba(0,0,0,.2)', cursor: 'pointer' });
+      btn.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        hideBadge();
+        await window.MojiMarker.addFromRange(range);
+      });
+      badge.appendChild(btn);
+    }
     (document.body || document.documentElement).appendChild(badge);
   }
 
@@ -70,6 +94,7 @@
 
   // ドラッグを終えた時・キーボードで選択した時にバッジを出す
   document.addEventListener('mouseup', (e) => {
+    if (badge && badge.contains(e.target)) return; // バッジ上の操作では出し直さない
     lastMouse = [e.clientX, e.clientY];
     setTimeout(() => refresh(true), 0);
   }, true);
@@ -82,7 +107,7 @@
     clearTimeout(timer);
     timer = setTimeout(() => { if (!getSelectedText().trim()) { hideBadge(); updateMenu(null); } }, 150);
   });
-  document.addEventListener('mousedown', hideBadge, true);
+  document.addEventListener('mousedown', (e) => { if (!(badge && badge.contains(e.target))) hideBadge(); }, true);
   // 右クリック直前にも念のため最新化／タブを切り替えて戻った時も最新化
   document.addEventListener('contextmenu', () => refresh(false), true);
   document.addEventListener('visibilitychange', () => {
@@ -99,6 +124,7 @@
 
     const box = document.createElement('div');
     box.id = 'moji-count-toast';
+    box.setAttribute('data-moji-ui', '');
     css(box, {
       position: 'fixed', right: '20px', bottom: '20px', zIndex: '2147483647',
       background: '#fff', color: '#222', borderRadius: '10px', padding: '14px 16px',
